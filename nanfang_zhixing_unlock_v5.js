@@ -4,8 +4,8 @@
  * 支持 Loon 远程直连。
  */
 
-const FUTURE_TIME = "2099-12-31 23:59:59";
-const FUTURE_TIMESTAMP = 4102415999000;
+const FUTURE_TIME = "2036-12-31 23:59:59";
+const FUTURE_TIMESTAMP = 2114294399000;
 const SCRIPT_NAME = "南方智行";
 
 const url = $request.url;
