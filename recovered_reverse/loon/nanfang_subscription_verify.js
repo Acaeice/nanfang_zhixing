@@ -16,6 +16,8 @@
  * - observe 模式只记录，不改写响应。
  * - 默认 strict=1，优先保证“验证结果可信”而不是“尽量改到值”。
  * - 如果 observe 已确认 URL 正确但字段缺失，才建议临时使用 strict=0 扩大注入范围。
+ * - 当前会同时观察可能参与门控的状态字段，如 isExpired / serviceStatus /
+ *   statusCode / controlPermission / sharePermissions。
  */
 
 const args = parseArgument(typeof $argument === "string" ? $argument : "");
@@ -80,7 +82,7 @@ function main() {
       });
       discovery.containers.forEach((container) => {
         log(
-          `候选容器 ${container.path} keys=${container.keys.join(", ")}`
+          `候选容器 ${container.path} keys=${container.keys.join(", ")} sample=${container.sample}`
         );
       });
     }
@@ -171,6 +173,20 @@ function discoverFields(node, path, result) {
     "vipExpire",
     "expireBeginTime",
     "expireEndTime",
+    "isExpired",
+    "serviceStatus",
+    "statusCode",
+    "status",
+    "controlPermission",
+    "sharePermissions",
+    "dictionaryPermissions",
+    "permissionList",
+    "permissions",
+    "available",
+    "enabled",
+    "isEnable",
+    "isOpen",
+    "canUse",
   ];
 
   watchedKeys.forEach((key) => {
@@ -188,6 +204,7 @@ function discoverFields(node, path, result) {
     output.containers.push({
       path: currentPath,
       keys: Object.keys(node).slice(0, 20),
+      sample: buildObjectSample(node),
     });
   }
 
@@ -316,7 +333,21 @@ function looksLikeCandidateContainer(node) {
   }
   const keys = Object.keys(node);
   return (
-    ["memberId", "memberName", "vin", "vehicleVin", "tboxExpireTime", "vipExpire"].some((key) =>
+    [
+      "memberId",
+      "memberName",
+      "vin",
+      "vehicleVin",
+      "tboxExpireTime",
+      "vipExpire",
+      "isExpired",
+      "serviceStatus",
+      "statusCode",
+      "controlPermission",
+      "sharePermissions",
+      "dictionaryPermissions",
+      "permissionList",
+    ].some((key) =>
       keys.indexOf(key) !== -1
     ) ||
     ["carInfo", "userInfo", "userDetail", "vehicle", "data", "result"].some((key) =>
@@ -384,6 +415,25 @@ function stringifyValue(value) {
     }
   }
   return String(value);
+}
+
+function buildObjectSample(node) {
+  const sample = {};
+  Object.keys(node)
+    .slice(0, 12)
+    .forEach((key) => {
+      const value = node[key];
+      if (isObject(value)) {
+        sample[key] = "{...}";
+        return;
+      }
+      if (Array.isArray(value)) {
+        sample[key] = `[len=${value.length}]`;
+        return;
+      }
+      sample[key] = stringifyValue(value);
+    });
+  return stringifyValue(sample);
 }
 
 function log(message) {

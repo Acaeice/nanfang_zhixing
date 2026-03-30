@@ -153,3 +153,13 @@ argument="mode=warn7&notify=1&strict=1&target=both"
 如果 `observe` 模式发现真正命中的字段或接口和当前恢复结果不一致，把 Loon 的命中 URL 和返回字段结构给我，我就继续把恢复工程往真实逻辑修正。
 
 如果你把 `observe-full` 的命中日志和 `target=tbox/vip` 两轮对比结果发我，我可以把恢复工程里的判断逻辑从“高可信推断”继续收敛到“几乎可以直接落源码”的级别。
+
+如果 `target=tbox` 和 `target=vip` 都不能触发预期变化，那么下一优先级不是继续猜时间字段，而是看 `observe-full` 中是否出现这些真实门控字段：
+
+- `isExpired`
+- `serviceStatus`
+- `statusCode`
+- `controlPermission`
+- `sharePermissions`
+
+这批字段已经加入脚本观察范围。只要你把命中的 URL、字段路径和原值发我，我就可以继续把恢复工程往真正拦截点修正。
