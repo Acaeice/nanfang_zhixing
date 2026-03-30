@@ -144,10 +144,10 @@ function buildScenario(options) {
   return {
     memberId: options.memberId,
     memberName: options.memberName,
-    expireBeginTime: begin.toISOString(),
-    expireEndTime: expire.toISOString(),
-    tboxExpireTime: expire.toISOString(),
-    vipExpire: expire.toISOString(),
+    expireBeginTime: begin,
+    expireEndTime: expire,
+    tboxExpireTime: expire,
+    vipExpire: expire,
   };
 }
 
@@ -230,7 +230,7 @@ function patchKnownFields(node, scenario, patches, path, targetType) {
   resolvePatchKeys(targetType).forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(node, key)) {
       const beforeValue = node[key];
-      node[key] = scenario[key];
+      node[key] = adaptScenarioValue(key, beforeValue, scenario[key]);
       patches.push(
         `${path}.${key}:${stringifyValue(beforeValue)}=>${stringifyValue(node[key])}`
       );
@@ -254,7 +254,7 @@ function injectLikelyContainers(root, scenario, patches, targetType) {
     const before = patchKeys.map((key) => container.node[key]).join("|");
 
     patchKeys.forEach((key) => {
-      container.node[key] = scenario[key];
+      container.node[key] = adaptScenarioValue(key, container.node[key], scenario[key]);
     });
 
     const after = patchKeys.map((key) => container.node[key]).join("|");
@@ -415,6 +415,42 @@ function stringifyValue(value) {
     }
   }
   return String(value);
+}
+
+function adaptScenarioValue(key, originalValue, scenarioValue) {
+  if (
+    key !== "tboxExpireTime" &&
+    key !== "vipExpire" &&
+    key !== "expireBeginTime" &&
+    key !== "expireEndTime"
+  ) {
+    return scenarioValue;
+  }
+
+  const originalText = stringifyValue(originalValue);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(originalText)) {
+    return formatDateTime(scenarioValue);
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(originalText)) {
+    return formatDate(scenarioValue);
+  }
+
+  return scenarioValue.toISOString();
+}
+
+function formatDateTime(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatDate(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
 }
 
 function buildObjectSample(node) {
