@@ -6,18 +6,23 @@
  * 2. 再通过场景注入，把这些字段改成“已生效 / 7天预警 / 已过期”，验证我们恢复出的门控逻辑是否成立。
  *
  * Loon 参数：
- *   mode=observe | active | warn7 | expired
- *   notify=1     是否弹通知
+ *   mode=observe | observe-full | active | warn7 | expired
+ *   notify=1      是否弹通知
+ *   strict=1      严格模式。默认只改响应里原本就存在的字段。
+ *   target=both   both | tbox | vip，分别验证到底是哪个字段在起作用。
  *
  * 注意：
  * - 该脚本只处理 JSON 响应。
  * - observe 模式只记录，不改写响应。
- * - active / warn7 / expired 模式会尽量在命中的 JSON 容器中改写到期字段。
+ * - 默认 strict=1，优先保证“验证结果可信”而不是“尽量改到值”。
+ * - 如果 observe 已确认 URL 正确但字段缺失，才建议临时使用 strict=0 扩大注入范围。
  */
 
 const args = parseArgument(typeof $argument === "string" ? $argument : "");
 const mode = args.mode || "observe";
 const shouldNotify = args.notify === "1";
+const isStrict = args.strict !== "0";
+const target = args.target || "both";
 const requestUrl = safeGet(() => $request.url, "");
 const responseBody = safeGet(() => $response.body, "");
 
@@ -61,13 +66,24 @@ function main() {
     return;
   }
 
-  if (mode === "observe") {
+  if (mode === "observe" || mode === "observe-full") {
+    const summary = buildObservationSummary(discovery);
     const message = [
       "命中订阅相关响应",
       shortUrl(requestUrl),
-      discovery.paths.length > 0 ? `字段: ${discovery.paths.join(", ")}` : "字段: 未直接命中，但 URL 很像订阅/车辆详情接口",
+      summary,
     ].join("\n");
     log(message);
+    if (mode === "observe-full") {
+      discovery.entries.forEach((entry) => {
+        log(`字段快照 ${entry.path} = ${stringifyValue(entry.value)}`);
+      });
+      discovery.containers.forEach((container) => {
+        log(
+          `候选容器 ${container.path} keys=${container.keys.join(", ")}`
+        );
+      });
+    }
     if (shouldNotify) {
       $notification.post("南方智行订阅观察", mode, message);
     }
@@ -83,14 +99,18 @@ function main() {
   }
 
   const patches = [];
-  patchKnownFields(json, scenario, patches, "$");
-  injectLikelyContainers(json, scenario, patches);
+  patchKnownFields(json, scenario, patches, "$", target);
+  if (!isStrict && patches.length === 0) {
+    injectLikelyContainers(json, scenario, patches, target);
+  }
 
   if (patches.length === 0) {
     const message = [
       "命中可疑接口，但未找到可改写字段",
       shortUrl(requestUrl),
-      "建议先用 mode=observe 再看真实响应结构",
+      isStrict
+        ? "当前是 strict=1，只会改真实存在的字段；先用 observe-full 看清结构，必要时再切 strict=0"
+        : "建议先用 mode=observe-full 再看真实响应结构",
     ].join("\n");
     log(message);
     if (shouldNotify) {
@@ -103,6 +123,8 @@ function main() {
   const output = JSON.stringify(json);
   const message = [
     `已注入场景: ${mode}`,
+    `目标字段: ${target}`,
+    `严格模式: ${isStrict ? "on" : "off"}`,
     shortUrl(requestUrl),
     `改写: ${patches.join(", ")}`,
   ].join("\n");
@@ -129,7 +151,7 @@ function buildScenario(options) {
 
 function discoverFields(node, path, result) {
   const currentPath = path || "$";
-  const output = result || { paths: [] };
+  const output = result || { paths: [], entries: [], containers: [] };
 
   if (Array.isArray(node)) {
     for (let index = 0; index < node.length; index += 1) {
@@ -153,9 +175,21 @@ function discoverFields(node, path, result) {
 
   watchedKeys.forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(node, key)) {
-      output.paths.push(`${currentPath}.${key}`);
+      const fieldPath = `${currentPath}.${key}`;
+      output.paths.push(fieldPath);
+      output.entries.push({
+        path: fieldPath,
+        value: node[key],
+      });
     }
   });
+
+  if (looksLikeCandidateContainer(node)) {
+    output.containers.push({
+      path: currentPath,
+      keys: Object.keys(node).slice(0, 20),
+    });
+  }
 
   Object.keys(node).forEach((key) => {
     discoverFields(node[key], `${currentPath}.${key}`, output);
@@ -164,10 +198,10 @@ function discoverFields(node, path, result) {
   return output;
 }
 
-function patchKnownFields(node, scenario, patches, path) {
+function patchKnownFields(node, scenario, patches, path, targetType) {
   if (Array.isArray(node)) {
     for (let index = 0; index < node.length; index += 1) {
-      patchKnownFields(node[index], scenario, patches, `${path}[${index}]`);
+      patchKnownFields(node[index], scenario, patches, `${path}[${index}]`, targetType);
     }
     return;
   }
@@ -176,26 +210,22 @@ function patchKnownFields(node, scenario, patches, path) {
     return;
   }
 
-  [
-    "memberId",
-    "memberName",
-    "tboxExpireTime",
-    "vipExpire",
-    "expireBeginTime",
-    "expireEndTime",
-  ].forEach((key) => {
+  resolvePatchKeys(targetType).forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(node, key)) {
+      const beforeValue = node[key];
       node[key] = scenario[key];
-      patches.push(`${path}.${key}`);
+      patches.push(
+        `${path}.${key}:${stringifyValue(beforeValue)}=>${stringifyValue(node[key])}`
+      );
     }
   });
 
   Object.keys(node).forEach((key) => {
-    patchKnownFields(node[key], scenario, patches, `${path}.${key}`);
+    patchKnownFields(node[key], scenario, patches, `${path}.${key}`, targetType);
   });
 }
 
-function injectLikelyContainers(root, scenario, patches) {
+function injectLikelyContainers(root, scenario, patches, targetType) {
   const candidates = collectCandidateContainers(root);
 
   candidates.forEach((container) => {
@@ -203,29 +233,17 @@ function injectLikelyContainers(root, scenario, patches) {
       return;
     }
 
-    const before = [
-      container.node.memberId,
-      container.node.memberName,
-      container.node.tboxExpireTime,
-      container.node.vipExpire,
-    ].join("|");
+    const patchKeys = resolvePatchKeys(targetType);
+    const before = patchKeys.map((key) => container.node[key]).join("|");
 
-    container.node.memberId = scenario.memberId;
-    container.node.memberName = scenario.memberName;
-    container.node.tboxExpireTime = scenario.tboxExpireTime;
-    container.node.vipExpire = scenario.vipExpire;
-    container.node.expireBeginTime = scenario.expireBeginTime;
-    container.node.expireEndTime = scenario.expireEndTime;
+    patchKeys.forEach((key) => {
+      container.node[key] = scenario[key];
+    });
 
-    const after = [
-      container.node.memberId,
-      container.node.memberName,
-      container.node.tboxExpireTime,
-      container.node.vipExpire,
-    ].join("|");
+    const after = patchKeys.map((key) => container.node[key]).join("|");
 
     if (before !== after) {
-      patches.push(`${container.path}.*`);
+      patches.push(`${container.path}.*:${before}=>${after}`);
     }
   });
 }
@@ -271,6 +289,42 @@ function isLikelySubscriptionUrl(url) {
   );
 }
 
+function buildObservationSummary(discovery) {
+  if (discovery.entries.length === 0) {
+    return "字段: 未直接命中，但 URL 很像订阅/车辆详情接口";
+  }
+
+  return `字段: ${discovery.entries
+    .map((entry) => `${entry.path}=${stringifyValue(entry.value)}`)
+    .join(", ")}`;
+}
+
+function resolvePatchKeys(targetType) {
+  const baseKeys = ["memberId", "memberName", "expireBeginTime", "expireEndTime"];
+  if (targetType === "tbox") {
+    return baseKeys.concat(["tboxExpireTime"]);
+  }
+  if (targetType === "vip") {
+    return baseKeys.concat(["vipExpire"]);
+  }
+  return baseKeys.concat(["tboxExpireTime", "vipExpire"]);
+}
+
+function looksLikeCandidateContainer(node) {
+  if (!isObject(node)) {
+    return false;
+  }
+  const keys = Object.keys(node);
+  return (
+    ["memberId", "memberName", "vin", "vehicleVin", "tboxExpireTime", "vipExpire"].some((key) =>
+      keys.indexOf(key) !== -1
+    ) ||
+    ["carInfo", "userInfo", "userDetail", "vehicle", "data", "result"].some((key) =>
+      keys.indexOf(key) !== -1
+    )
+  );
+}
+
 function parseArgument(argument) {
   const output = {};
   if (!argument) {
@@ -313,6 +367,23 @@ function safeGet(fn, fallback) {
 
 function shortUrl(url) {
   return url.length > 140 ? `${url.slice(0, 137)}...` : url;
+}
+
+function stringifyValue(value) {
+  if (value === null) {
+    return "null";
+  }
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      return "[object]";
+    }
+  }
+  return String(value);
 }
 
 function log(message) {
